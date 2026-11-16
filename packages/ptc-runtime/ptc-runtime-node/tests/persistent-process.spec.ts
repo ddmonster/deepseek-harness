@@ -12,7 +12,7 @@ async function setup(limit = 4096, chdir: (cwd: string) => void = () => {}) {
   const host = Duplex.from({ readable: second, writable: first })
   child.on('error', () => {})
   host.on('error', () => {})
-  const state: PersistentProcess = { env: { FIXTURE_SECRET: 'test', PATH: '/native' }, stdout: { write: () => true }, stderr: { write: () => true }, chdir }
+  const state: PersistentProcess = { env: { FIXTURE_SECRET: 'test', PATH: '/native', LD_PRELOAD: '/bundle/libgbm.so.1' }, stdout: { write: () => true }, stderr: { write: () => true }, chdir }
   const nativeEnvironment = state.env
   const ready = Promise.withResolvers<true>()
   const seen: Record<string, unknown>[] = []
@@ -63,7 +63,9 @@ it('keeps an environment while capturing each evaluation and binding replies sep
   expect(decodePtcJsonWire(result.value)).toBe(42)
   expect(h.seen.filter(item => item.type === 'log').map(item => item.text)).toEqual(['raw', 'value 2'])
   expect(h.state.env).toEqual({})
-  expect(h.nativeEnvironment).toEqual({ PATH: '/native' })
+  // The loader applies the preload list before any program code runs, so it stays with the
+  // native child; credentials and every other inherited value are still cleared.
+  expect(h.nativeEnvironment).toEqual({ PATH: '/native', LD_PRELOAD: '/bundle/libgbm.so.1' })
   const failed = await h.run('throw new Error("failed")')
   expect(failed).toMatchObject({ error: { kind: 'exception' } })
   expect((failed.error as { message: string }).message).toContain('failed')

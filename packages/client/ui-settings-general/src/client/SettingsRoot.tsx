@@ -13,7 +13,7 @@
  * is active. Visible dialog chrome belongs to the step, so a
  * mounted-but-deciding step paints nothing here.
  */
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import {
@@ -28,8 +28,18 @@ import { DesktopUpdateIndicator } from './DesktopUpdateIndicator.tsx'
 
 const RECOVERY_CONFIRMATION_MS = 2_000
 
+/**
+ * Shortest outage that earns a recovery confirmation. A carrier reconnecting in less
+ * than this is churn rather than an outage the user could perceive, and confirming each
+ * cycle would repaint the pill continuously on a host whose transport drops that fast.
+ */
+const RECOVERY_CONFIRMATION_MIN_OUTAGE_MS = 3_000
+
 /** Minimum visible time for the connecting pill; shorter attempts read as flicker. */
 const CONNECTING_MIN_VISIBLE_MS = 800
+
+/** How long the pill reserves its footprint after it stops reporting a connection state. */
+const PILL_RESERVED_MS = 1_000
 
 /** Nav glyph by section id; unknown ids fall back to the settings gear. */
 function navIcon(id: string) {
@@ -109,67 +119,60 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
   ), document.body)
 }
 
+type ConnectionPillProps = {
+  wide: boolean
+  reconnect: () => void
+  useConnectionState: SettingsRootComponentProps['useConnectionState']
+  desktopUpdateInstalling: boolean
+  t: SettingsRootComponentProps['t']
+  /** Receives whether the pill currently reports a connection state, for the sibling update indicator. */
+  children: (pillVisible: boolean) => ReactNode
+}
+
 /**
- * Render the settings trigger and panel.
- * @param props - composed slot props (contract/slots.ts).
- * @returns the settings shell element tree.
+ * Own the connection-state subscription and its pill timing. Keeping it here
+ * confines a transport transition to this subtree: the shell around it does not
+ * re-render, so a reconnecting carrier cannot relayout the trigger row.
+ *
+ * The pill's footnote stays reserved for {@link PILL_RESERVED_MS} after the
+ * indicator clears. A retry cycle that resolves inside that window repaints only
+ * the pill's own content instead of inserting and removing a flex item, which is
+ * the row jump a fast-reconnecting host would otherwise show on every cycle.
+ * @param props.wide - whether the sidebar is expanded and the pill may show.
+ * @param props.reconnect - request an immediate reconnect attempt.
+ * @param props.useConnectionState - connection-state selector hook from the slot props.
+ * @param props.desktopUpdateInstalling - an installing update outranks the pill.
+ * @param props.t - settings dictionary.
+ * @returns the indicator, optionally inside a reserved-footprint wrapper.
  */
-export function SettingsRoot(props: SettingsRootComponentProps) {
-  const {
-    wide, reconnect, useConnectionState, useSections, useOnboardingSteps, useSessions, renderSlot, t,
-    useDesktopUpdate, openDesktopUpdate, useStore, actions, useShortcuts,
-  } = props
-  const { open, activeId } = useStore(state => state)
-  const shortcut = useShortcuts(rows => rows.find(row => row.id === 'settings.open'))
-  const { close, openSection } = actions
-  const [requestedOnboarding, setRequestedOnboarding] = useState<string | undefined>()
-  const [completedOnboarding, setCompletedOnboarding] = useState<ReadonlySet<string>>(() => new Set())
+function ConnectionPill({ wide, reconnect, useConnectionState, desktopUpdateInstalling, t, children }: ConnectionPillProps) {
+  const connectionState = useConnectionState(state => state)
   const [showRecovery, setShowRecovery] = useState(false)
   const [holdConnecting, setHoldConnecting] = useState(false)
+  const [reserved, setReserved] = useState(false)
   const connectingShownAt = useRef<number | undefined>(undefined)
-
-  // The ledger tick keeps the nav rows fresh: registrants re-register with
-  // freshly localized text on locale change, and the trigger/header/close
-  // seats re-render through their own outlets' subscriptions.
-  const rows = useSections(s => s)
-  const desktopUpdate = useDesktopUpdate(state => state)
-  const connectionState = useConnectionState(state => state)
+  /** When the connection left `connected`, cleared once the recovery is classified. */
+  const interruptedAt = useRef<number | undefined>(undefined)
   const previousConnectionState = useRef(connectionState)
-  const onboardingSteps = useOnboardingSteps(s => s)
-  const onboardingActive = useSessions((state) => {
-    const main = Object.values(state.byId)
-      .find(session => (session.retainedBy.mainView ?? 0) > 0)
-    return state.phase === 'ready' && (main === undefined || main.blank)
-  })
-  const onboardingStep = requestedOnboarding !== undefined
-    ? onboardingSteps.find(step => step.id === requestedOnboarding)
-    : onboardingActive
-      ? onboardingSteps.find(step => !completedOnboarding.has(step.id))
-      : undefined
-
-  useEffect(() => {
-    if (onboardingActive) return
-    setCompletedOnboarding(new Set())
-  }, [onboardingActive])
-
-  const onboardingStepSeen = useRef(onboardingStep)
-  // An onboarding step owns the viewport and marks `#root` inert. The panel portals
-  // beside `#root`, outside that mark, so a step that appears while the panel is open
-  // takes the panel down rather than leaving it focusable behind the onboarding mask.
-  useEffect(() => {
-    const appeared = onboardingStepSeen.current === undefined && onboardingStep !== undefined
-    onboardingStepSeen.current = onboardingStep
-    if (appeared && open) close()
-  }, [onboardingStep, open, close])
 
   useLayoutEffect(() => {
     const previous = previousConnectionState.current
     previousConnectionState.current = connectionState
     if (connectionState !== 'connected') {
+      // Record when the outage began so a recovery can be told apart from churn. The
+      // controller reports a lost generation as `connecting` when it retries at once, so
+      // any departure from `connected` starts the window, not only `disconnected`.
+      if (previous === 'connected') interruptedAt.current = Date.now()
       setShowRecovery(false)
       return
     }
     if (previous !== 'disconnected' && previous !== 'connecting') return
+    const interruptedAtMs = interruptedAt.current
+    interruptedAt.current = undefined
+    // A carrier that drops and re-establishes faster than this never gave the
+    // user an outage to notice: confirming every cycle would flash the pill
+    // continuously on such a host.
+    if (interruptedAtMs !== undefined && Date.now() - interruptedAtMs < RECOVERY_CONFIRMATION_MIN_OUTAGE_MS) return
     setShowRecovery(true)
   }, [connectionState])
 
@@ -199,14 +202,6 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
     }
   }, [connectionState])
 
-  const completeOnboardingStep = useCallback((id: string) => {
-    setRequestedOnboarding(undefined)
-    setCompletedOnboarding((previous) => {
-      if (previous.has(id)) return previous
-      return new Set([...previous, id])
-    })
-  }, [])
-
   let connectionIndicator: ConnectionIndicatorState | undefined
   if (connectionState === 'connecting' || holdConnecting) {
     connectionIndicator = 'connecting'
@@ -215,6 +210,92 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
   } else if (showRecovery) {
     connectionIndicator = 'recovered'
   }
+  const visible = wide && !desktopUpdateInstalling ? connectionIndicator : undefined
+
+  useLayoutEffect(() => {
+    if (visible !== undefined) {
+      setReserved(true)
+      return
+    }
+    if (!reserved) return
+    const timeout = window.setTimeout(() => { setReserved(false) }, PILL_RESERVED_MS)
+    return () => { window.clearTimeout(timeout) }
+  }, [visible, reserved])
+
+  const indicator = (
+    <ConnectionIndicator
+      state={visible}
+      disconnectedLabel={t('connection.error')}
+      connectingLabel={t('connection.connecting')}
+      recoveredLabel={t('connection.connected')}
+      reconnectActionLabel={t('connection.reconnect')}
+      restartActionLabel={t('connection.restart')}
+      onReconnect={reconnect}
+    />
+  )
+  return (
+    <>
+      {reserved ? <div className={css.pillFooting}>{indicator}</div> : indicator}
+      {children(visible !== undefined)}
+    </>
+  )
+}
+
+/**
+ * Render the settings trigger and panel.
+ * @param props - composed slot props (contract/slots.ts).
+ * @returns the settings shell element tree.
+ */
+export function SettingsRoot(props: SettingsRootComponentProps) {
+  const {
+    wide, reconnect, useConnectionState, useSections, useOnboardingSteps, useSessions, renderSlot, t,
+    useDesktopUpdate, openDesktopUpdate, useStore, actions, useShortcuts,
+  } = props
+  const { open, activeId } = useStore(state => state)
+  const shortcut = useShortcuts(rows => rows.find(row => row.id === 'settings.open'))
+  const { close, openSection } = actions
+  const [requestedOnboarding, setRequestedOnboarding] = useState<string | undefined>()
+  const [completedOnboarding, setCompletedOnboarding] = useState<ReadonlySet<string>>(() => new Set())
+
+  // The ledger tick keeps the nav rows fresh: registrants re-register with
+  // freshly localized text on locale change, and the trigger/header/close
+  // seats re-render through their own outlets' subscriptions.
+  const rows = useSections(s => s)
+  const desktopUpdate = useDesktopUpdate(state => state)
+  const onboardingSteps = useOnboardingSteps(s => s)
+  const onboardingActive = useSessions((state) => {
+    const main = Object.values(state.byId)
+      .find(session => (session.retainedBy.mainView ?? 0) > 0)
+    return state.phase === 'ready' && (main === undefined || main.blank)
+  })
+  const onboardingStep = requestedOnboarding !== undefined
+    ? onboardingSteps.find(step => step.id === requestedOnboarding)
+    : onboardingActive
+      ? onboardingSteps.find(step => !completedOnboarding.has(step.id))
+      : undefined
+
+  useEffect(() => {
+    if (onboardingActive) return
+    setCompletedOnboarding(new Set())
+  }, [onboardingActive])
+
+  const onboardingStepSeen = useRef(onboardingStep)
+  // An onboarding step owns the viewport and marks `#root` inert. The panel portals
+  // beside `#root`, outside that mark, so a step that appears while the panel is open
+  // takes the panel down rather than leaving it focusable behind the onboarding mask.
+  useEffect(() => {
+    const appeared = onboardingStepSeen.current === undefined && onboardingStep !== undefined
+    onboardingStepSeen.current = onboardingStep
+    if (appeared && open) close()
+  }, [onboardingStep, open, close])
+
+  const completeOnboardingStep = useCallback((id: string) => {
+    setRequestedOnboarding(undefined)
+    setCompletedOnboarding((previous) => {
+      if (previous.has(id)) return previous
+      return new Set([...previous, id])
+    })
+  }, [])
 
   return (
     <>
@@ -236,17 +317,13 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
             {renderSlot('settings.trigger', { wide })}
           </button>
         </Tooltip> })}
-        <ConnectionIndicator
-          state={wide && desktopUpdate.presentation?.phase !== 'installing' ? connectionIndicator : undefined}
-          disconnectedLabel={t('connection.error')}
-          connectingLabel={t('connection.connecting')}
-          recoveredLabel={t('connection.connected')}
-          reconnectActionLabel={t('connection.reconnect')}
-          restartActionLabel={t('connection.restart')}
-          onReconnect={reconnect}
-        />
-        <DesktopUpdateIndicator wide={wide} hidden={connectionIndicator !== undefined && desktopUpdate.presentation?.phase !== 'installing'}
-          t={t} view={desktopUpdate} onOpen={openDesktopUpdate} />
+        <ConnectionPill wide={wide} reconnect={reconnect} useConnectionState={useConnectionState}
+          desktopUpdateInstalling={desktopUpdate.presentation?.phase === 'installing'} t={t}>
+          {pillVisible => (
+            <DesktopUpdateIndicator wide={wide} hidden={pillVisible && desktopUpdate.presentation?.phase !== 'installing'}
+              t={t} view={desktopUpdate} onOpen={openDesktopUpdate} />
+          )}
+        </ConnectionPill>
       </div>
       {open && (
         <SettingsPanel

@@ -3,7 +3,7 @@ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
 
 import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   app,
@@ -63,6 +63,8 @@ import { DesktopUpdateOverlays } from './update-overlay.ts'
 import { DesktopQuitConfirmation } from './quit-confirmation.ts'
 import { DesktopTray } from './tray.ts'
 import { DesktopBackgroundNotice } from './background-notice.ts'
+import { measureDesktopLinuxHost } from './linux-host.ts'
+import { planDesktopLinuxLaunch, resolveHardwareAcceleration, type DesktopLinuxLaunchPlan, type DesktopLaunchNotice } from './linux-launch.ts'
 
 let focusPrimaryWindow = (): void => {}
 let stopForRecovery = async (): Promise<void> => {}
@@ -150,6 +152,27 @@ interface RuntimeResources {
   readonly node: string
   readonly pnpm: string
   readonly dsh: string
+}
+
+/** Hosts that report no measured degradation, used off Linux. */
+const NO_LINUX_DEGRADATION: DesktopLinuxLaunchPlan = { switches: [], notices: [] }
+
+/**
+ * Measure this Linux host and append the switches it requires.
+ *
+ * Chromium reads its switches while the app becomes ready, so the caller settles this
+ * before `whenReady()`. A failed measurement keeps Electron's defaults and reports the
+ * error instead of blocking startup.
+ * @param env - Desktop process environment.
+ * @returns The accepted plan, or none off Linux.
+ */
+async function planLinuxLaunch(env: NodeJS.ProcessEnv): Promise<DesktopLinuxLaunchPlan> {
+  if (process.platform !== 'linux') return NO_LINUX_DEGRADATION
+  // A packaged AppImage ships the helper beside the executable; app.getAppPath() points inside the asar.
+  const host = await measureDesktopLinuxHost(join(dirname(process.execPath), 'chrome-sandbox'))
+  const plan = planDesktopLinuxLaunch(host, { hardwareAcceleration: resolveHardwareAcceleration(env) })
+  for (const [name, value] of plan.switches) app.commandLine.appendSwitch(name, value)
+  return plan
 }
 
 function runtimeResources(): RuntimeResources {
@@ -316,7 +339,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
   return window
 }
 
-async function main(): Promise<void> {
+async function main(launch: DesktopLinuxLaunchPlan = { switches: [], notices: [] }): Promise<void> {
   const desktopSettings = readDesktopSettings(app.getPath('userData'))
   void pruneCrashReports(app.getPath('logs'))
   const journalDirectory = process.env.DSH_DESKTOP_UPDATE_JOURNAL_DIR
@@ -1368,20 +1391,70 @@ async function main(): Promise<void> {
   if (window !== undefined && development && process.env.DSH_DESKTOP_OPEN_DEVTOOLS !== '0') {
     window.webContents.openDevTools({ mode: 'detach' })
   }
+  presentLaunchNotices(launch, window)
   publishUpdate(updateState)
 }
 
 const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
 
-if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error)
-  console.error(error)
-  const diagnosticFile = process.env.DSH_DESKTOP_DIAGNOSTIC_FILE
-  if (diagnosticFile !== undefined) {
-    await writeFile(diagnosticFile, `${error instanceof Error ? error.stack ?? message : message}\n`).catch(() => undefined)
+/** Every notice kind reports a degradation, so the copy is selected per kind. */
+const LAUNCH_NOTICE_COPY = {
+  'sandbox-unavailable': (messages: ReturnType<typeof currentDesktopLocale>['messages']) => ({
+    title: messages.sandboxUnavailableTitle,
+    detail: messages.sandboxUnavailableDetail,
+  }),
+} satisfies Record<DesktopLaunchNotice, (messages: ReturnType<typeof currentDesktopLocale>['messages']) => { title: string; detail: string }>
+
+/**
+ * Present the degradations the shell accepted, once a window can host the notice.
+ * @param plan - Accepted launch plan, whose notices explain each degradation.
+ * @param owner - Window that hosts the notice; startup did not open one when undefined.
+ */
+function presentLaunchNotices(plan: DesktopLinuxLaunchPlan, owner: BrowserWindow | undefined): void {
+  if (owner === undefined || plan.notices.length === 0) return
+  const messages = currentDesktopLocale().messages
+  for (const notice of plan.notices) {
+    const copy = LAUNCH_NOTICE_COPY[notice](messages)
+    void dialog.showMessageBox(owner, {
+      type: 'warning',
+      title: copy.title,
+      message: copy.title,
+      detail: copy.detail,
+      buttons: ['OK'],
+      cancelId: 0,
+    }).catch((error: unknown) => { console.error(error) })
   }
-  reportFatal(error, 'main')
-}).catch((error: unknown) => {
-  console.error(error)
-  app.exit(1)
-})
+}
+
+/**
+ * Start the launch measurement before the app becomes ready.
+ *
+ * The measurement is requested here, synchronously, so Chromium sees the switches in
+ * time; off Linux no measurement starts and the plan is already settled. A failed
+ * measurement is reported and then treated as no degradation, because the switches
+ * only optimize a host and must never block an otherwise working launch.
+ * @param env - Desktop process environment.
+ * @returns The switches to apply and the notices to present once a window exists.
+ */
+function startLinuxLaunch(env: NodeJS.ProcessEnv): Promise<DesktopLinuxLaunchPlan> {
+  return planLinuxLaunch(env).catch((error: unknown) => {
+    console.error(error)
+    return NO_LINUX_DEGRADATION
+  })
+}
+
+if (ownsDesktopInstance) {
+  const launch = startLinuxLaunch(process.env)
+  void app.whenReady().then(() => launch).then(main).catch(async (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(error)
+    const diagnosticFile = process.env.DSH_DESKTOP_DIAGNOSTIC_FILE
+    if (diagnosticFile !== undefined) {
+      await writeFile(diagnosticFile, `${error instanceof Error ? error.stack ?? message : message}\n`).catch(() => undefined)
+    }
+    reportFatal(error, 'main')
+  }).catch((error: unknown) => {
+    console.error(error)
+    app.exit(1)
+  })
+}

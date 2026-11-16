@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for 2026-10-26-desktop-linux-launch-degradation.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-26-desktop-linux-launch-degradation.md
+/agent-note-desktop-linux-launch-degradation:
+  en: 6eed913deb7ea59b
+  zh: 1f39b64a8ba279a4
+/agent-note-desktop-linux-launch-degradation/problem:
+  en: b3334f00615d11a1
+  zh: f52f1da9e1bc2074
+/agent-note-desktop-linux-launch-degradation/decision:
+  en: 7203fc11f23d5af6
+  zh: 75ae6de130247c5b
+/agent-note-desktop-linux-launch-degradation/alternatives-considered:
+  en: 9bdbdadd4baa06f2
+  zh: d7072f308dd212c2
+/agent-note-desktop-linux-launch-degradation/consequences:
+  en: 3aad81cd2449cc1d
+  zh: 5ea77ede22d4b1cc
+/agent-note-desktop-linux-launch-degradation/testing:
+  en: 224c66aaa293c9ea
+  zh: 144988c1efd2c3fb

@@ -178,6 +178,7 @@ const harness = await vi.hoisted(async () => {
     getPath: vi.fn<(name: string) => string>(),
     setAboutPanelOptions: vi.fn<(options: Electron.AboutPanelOptionsOptions) => void>(),
     requestSingleInstanceLock: () => true,
+    commandLine: { appendSwitch: vi.fn<(name: string, value?: string) => void>() },
     setAsDefaultProtocolClient: vi.fn(),
     exit: vi.fn(),
     relaunch: vi.fn(),
@@ -277,6 +278,7 @@ const harness = await vi.hoisted(async () => {
       policyBlocked = deferred()
       embeddedPolicy = undefined
       fileDrag.install.mockReset()
+      app.commandLine.appendSwitch.mockReset()
       fileDrag.dispose.mockReset().mockResolvedValue(undefined)
       platformDisposeDeferred = undefined
       platformCloseDeferred = undefined
@@ -2537,4 +2539,89 @@ it('disables native product events for a disabled Desktop launch', async () => {
   await harness.navigated.promise
   expect(harness.analytics).not.toHaveBeenCalled()
   harness.analyticsEnabled = true
+})
+
+const linuxHost = vi.hoisted(() => ({ measure: vi.fn<() => Promise<unknown>>() }))
+vi.mock('../src/linux-host.ts', () => ({ measureDesktopLinuxHost: linuxHost.measure }))
+
+describe('desktop Linux launch integration', () => {
+  const measured = (gpu: boolean, sandbox: boolean, wayland: boolean, x11 = false) => ({
+    gpu: gpu ? { softwareOnly: false } : { softwareOnly: true, unsupportedDriver: 'hisi-drm' },
+    sandbox: sandbox ? { sandboxAvailable: true } : { sandboxAvailable: false, unavailableReason: 'helper-not-setuid' },
+    display: { waylandAvailable: wayland, x11Available: x11 },
+  })
+
+  beforeEach(() => {
+    linuxHost.measure.mockReset()
+    linuxHost.measure.mockResolvedValue(measured(true, true, false))
+  })
+
+  it.each(['darwin', 'win32'] as const)('appends no switch off Linux on %s', async (platform) => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(linuxHost.measure).not.toHaveBeenCalled()
+    expect(harness.app.commandLine.appendSwitch).not.toHaveBeenCalled()
+  })
+
+  it('applies the measured switches before the first window is created', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    // The measured UOS host: software-only GPU, unusable sandbox, Wayland session that
+    // also publishes an Xwayland socket. The shell must pick X11, the backend that survives.
+    linuxHost.measure.mockResolvedValue(measured(false, false, true, true))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(harness.app.commandLine.appendSwitch.mock.calls).toEqual([
+      ['disable-gpu', undefined], ['no-sandbox', undefined], ['disable-gpu-sandbox', undefined],
+      ['disable-dev-shm-usage', undefined], ['ozone-platform', 'x11'],
+    ])
+  })
+
+  it('explains the sandbox degradation once the main window exists', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    linuxHost.measure.mockResolvedValue(measured(true, false, false))
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await readyForLinuxWindow()
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      type: 'warning', message: en.sandboxUnavailableTitle, detail: en.sandboxUnavailableDetail,
+    }))
+  })
+
+  it('shows no notice when the helper confines renderers', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    linuxHost.measure.mockResolvedValue(measured(true, true, false))
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    await readyForLinuxWindow()
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalledWith(expect.anything(),
+      expect.objectContaining({ message: en.sandboxUnavailableTitle }))
+  })
+
+  it('keeps Electron defaults and still starts when the measurement fails', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    linuxHost.measure.mockRejectedValue(new Error('probe unavailable'))
+    await readyForLinuxWindow()
+    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: 'probe unavailable' }))
+    expect(harness.app.commandLine.appendSwitch).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
+  })
+
+  it('reports a malformed acceleration override and keeps Electron defaults', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    vi.stubEnv('DSH_DESKTOP_HARDWARE_ACCELERATION', 'on')
+    await readyForLinuxWindow()
+    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: 'DSH_DESKTOP_HARDWARE_ACCELERATION must be 1 or 0' }))
+    expect(harness.app.commandLine.appendSwitch).not.toHaveBeenCalled()
+    expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
+  })
+
+  async function readyForLinuxWindow(): Promise<void> {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    // The launch measurement settles before the first window, then startup reconciles the backend.
+    await vi.advanceTimersByTimeAsync(0)
+  }
 })

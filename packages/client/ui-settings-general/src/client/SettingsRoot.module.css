@@ -13,6 +13,17 @@
   margin: 8px 0 10px;
 }
 
+/* Keeps the pill's slot in the row after the indicator clears, so a retry cycle
+   that resolves inside the reservation repaints in place instead of moving the
+   trigger row. The reserved box matches the indicator's own 28px height and
+   collapses the indicator's footprint while it fades out. */
+.pillFooting {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 28px;
+}
+
 .trigger {
   flex: 1;
   min-width: 0;

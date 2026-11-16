@@ -169,7 +169,42 @@ export function createDevelopmentProjectMetadata(projectDir: string, release: De
   writeFileSync(join(projectDir, 'pnpm-workspace.yaml'), workspaceFile(), { mode: 0o600 })
 }
 
+/**
+ * The gateway heartbeat applied to Linux desktop profiles.
+ *
+ * On the targeted Linux hosts the carrier dies the moment the server writes a WebSocket
+ * ping control frame (data frames flow normally), so every heartbeat tick costs a
+ * reconnect and the client re-fetches its whole state. Stretching the interval to ten
+ * minutes makes that cost rare; a loopback-only desktop socket loses nothing by
+ * learning about a dead connection ten minutes late.
+ */
+const LINUX_HEARTBEAT_PATCH = [
+  '- id: typert-gateway',
+  "  name: '@deepseek-ai/dsh-api-gateway'",
+  '  config:',
+  '    websocketHeartbeatIntervalMs: 600000',
+].join('\n')
+
+/**
+ * Apply the Linux heartbeat entry once per profile, never overwriting user edits.
+ * @param projectDir - Profile directory whose `cordis.patch.yml` gains the entry.
+ */
+function ensureLinuxHeartbeatPatch(projectDir: string): void {
+  if (process.platform !== 'linux') return
+  const patchPath = join(projectDir, 'cordis.patch.yml')
+  if (!existsSync(patchPath)) return
+  const current = readFileSync(patchPath, 'utf8')
+  if (current.includes('websocketHeartbeatIntervalMs')) return
+  // A fresh profile seeds an empty flow sequence `[]`; a used one holds block entries.
+  // The entry must join whichever shape is present to keep the YAML valid.
+  const updated = current.trimEnd().endsWith('[]')
+    ? `${current.trimEnd().slice(0, -2)}${LINUX_HEARTBEAT_PATCH}\n`
+    : `${current.endsWith('\n') ? current : `${current}\n`}${LINUX_HEARTBEAT_PATCH}\n`
+  writeFileSync(patchPath, updated)
+}
+
 /** Create the first external plugin profile without running a package manager. */
 export function createPluginProfile(projectDir: string): void {
   initProfile(projectDir, WEB_PROFILE.bundles)
+  ensureLinuxHeartbeatPatch(projectDir)
 }

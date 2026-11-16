@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
-import { DesktopProjectManager } from '../src/project-manager.ts'
+import { createPluginProfile, DesktopProjectManager } from '../src/project-manager.ts'
 import { readProfilePlugins } from '@deepseek-ai/dsh-app-boot'
 import { runtimeFixture } from './runtime-fixture.ts'
 
@@ -328,5 +328,53 @@ describe('desktop link-backend projections', () => {
     expect(existsSync(join(profile, '.dsh-module-fallback'))).toBe(false)
     expect(lstatSync(join(profile, 'node_modules', 'bridge'), { throwIfNoEntry: false })).toBeUndefined()
     expect(existsSync(join(target, 'package.json'))).toBe(true)
+  })
+})
+
+describe('Linux desktop heartbeat patch', () => {
+  const HEARTBEAT_ENTRY = 'websocketHeartbeatIntervalMs: 600000'
+  function profileWithPlatform(platform: NodeJS.Platform): string {
+    const spy = vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+    try {
+      const dir = join(temporaryRoot(), 'profile')
+      createPluginProfile(dir)
+      return readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
+  it('joins the seeded empty patch on Linux', () => {
+    const patch = profileWithPlatform('linux')
+    expect(patch).toContain(HEARTBEAT_ENTRY)
+    // The entry must replace the seeded `[]`, not trail it, or the YAML is invalid.
+    expect(patch).not.toContain('[]')
+    expect(patch).toContain('- id: typert-gateway')
+  })
+
+  it('leaves non-Linux profiles untouched', () => {
+    expect(profileWithPlatform('darwin')).not.toContain(HEARTBEAT_ENTRY)
+  })
+
+  it('never edits a patch that already carries the entry', () => {
+    const dir = join(temporaryRoot(), 'profile')
+    mkdirSync(dir, { recursive: true })
+    const existing = "# mine\n- id: typert-gateway\n  name: '@deepseek-ai/dsh-api-gateway'\n  config:\n    websocketHeartbeatIntervalMs: 1234\n"
+    writeFileSync(join(dir, 'cordis.patch.yml'), existing)
+    const spy = vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    try { createPluginProfile(dir) } finally { spy.mockRestore() }
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toBe(existing)
+  })
+
+  it('appends to a populated user patch without breaking the block sequence', () => {
+    const dir = join(temporaryRoot(), 'profile')
+    mkdirSync(dir, { recursive: true })
+    const existing = '# mine\n- id: webserver\n  config:\n    port: 0\n'
+    writeFileSync(join(dir, 'cordis.patch.yml'), existing)
+    const spy = vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    try { createPluginProfile(dir) } finally { spy.mockRestore() }
+    const patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+    expect(patch.startsWith(existing)).toBe(true)
+    expect(patch).toContain(HEARTBEAT_ENTRY)
   })
 })

@@ -217,6 +217,8 @@ describe('SettingsRoot trigger', () => {
     expect(screen.queryByRole('button', { name: 'Disconnected, reconnect now' })).toBeNull()
 
     mounted.setConnectionState('disconnected')
+    // A recovery confirmation only follows an outage long enough to perceive.
+    act(() => { vi.advanceTimersByTime(3_000) })
     const indicator = screen.getByRole('button', { name: 'Disconnected, reconnect now' })
     expect(indicator.textContent).toContain('Disconnected')
     expect(indicator.hasAttribute('title')).toBe(false)
@@ -246,18 +248,20 @@ describe('SettingsRoot trigger', () => {
   it('keeps the attempt label steady through the hold and confirms for the full window', () => {
     vi.useFakeTimers()
     const mounted = mount({ dictionary: zh })
+    // A carrier that drops and retries at once reports `connecting` directly.
     mounted.setConnectionState('connecting')
     const attempt = screen.getByRole('button', { name: '连接中断，正在重试，点击立即重连' })
     expect(attempt.textContent).toContain('重新连接中')
     fireEvent.click(attempt)
     expect(mounted.reconnect).toHaveBeenCalledOnce()
     expect(attempt.textContent).toContain('重新连接中')
-    // An attempt that resolves mid-hold keeps its label until the hold ends.
-    act(() => { vi.advanceTimersByTime(100) })
+    // The outage has lasted long enough to earn a confirmation when it clears;
+    // this also exhausts the attempt's minimum-visible window.
+    act(() => { vi.advanceTimersByTime(3_100) })
+    // A later attempt that resolves inside its own hold keeps the attempt label
+    // until the hold ends. It is a new attempt only if it is still `connecting`
+    // after the earlier one settled, which the outage state already covers.
     mounted.setConnectionState('connected')
-    expect(screen.getByRole('button', { name: '连接中断，正在重试，点击立即重连' }).textContent)
-      .toContain('重新连接中')
-    act(() => { vi.advanceTimersByTime(700) })
     expect(screen.getByRole('status', { name: '连接成功' })).toBeTruthy()
     // The full two-second confirmation follows the delayed appearance.
     act(() => { vi.advanceTimersByTime(1_999) })
@@ -271,7 +275,7 @@ describe('SettingsRoot trigger', () => {
     vi.useFakeTimers()
     const mounted = mount()
     mounted.setConnectionState('connecting')
-    act(() => { vi.advanceTimersByTime(800) })
+    act(() => { vi.advanceTimersByTime(3_000) })
     mounted.setConnectionState('connected')
     expect(screen.getByRole('status', { name: 'Connected' })).toBeTruthy()
     act(() => { vi.advanceTimersByTime(2_000) })
@@ -541,4 +545,38 @@ it('passes current Settings key labels to the launcher and removes them when unb
 
   setShortcuts([{ ...row, keys: [], aria: undefined, binding: null, modified: true }])
   expect(launcher()).not.toHaveProperty('settingsShortcut')
+})
+
+describe('SettingsRoot connection churn', () => {
+  it('keeps the shell out of a connection-state transition', () => {
+    // The pill owns its own subscription, so a carrier transition must repaint
+    // only that subtree: re-rendering the shell would relayout the trigger row
+    // on every reconnect cycle.
+    vi.useFakeTimers()
+    const mounted = mount()
+    const callsAfterMount = mounted.renderSlot.mock.calls.length
+    mounted.setConnectionState('connecting')
+    expect(mounted.renderSlot.mock.calls.length).toBe(callsAfterMount)
+    mounted.setConnectionState('connected')
+    act(() => { vi.advanceTimersByTime(3_100) })
+    expect(mounted.renderSlot.mock.calls.length).toBe(callsAfterMount)
+  })
+
+  it('keeps the pill footprint reserved across a churn cycle', () => {
+    // A cycle that resolves inside the reservation repaints in place instead of
+    // removing and reinserting a flex item in the trigger row: the trigger button
+    // keeps its position in the row's child list throughout.
+    vi.useFakeTimers()
+    const mounted = mount()
+    const trigger = screen.getByRole('button', { name: 'Settings' })
+    const row = trigger.parentElement
+    const leadingSiblings = Array.from(row?.children ?? []).indexOf(trigger)
+    mounted.setConnectionState('connecting')
+    expect(Array.from(row?.children ?? []).indexOf(trigger)).toBe(leadingSiblings)
+    mounted.setConnectionState('connected')
+    // No recovery confirmation: the outage was too short to have been perceived.
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(Array.from(row?.children ?? []).indexOf(trigger)).toBe(leadingSiblings)
+  })
 })

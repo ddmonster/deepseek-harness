@@ -66,7 +66,10 @@ export function createElectronBuilderConfig(
   if (skipNotarization && (unsigned || resolvedPlatform !== 'darwin')) throw new Error('Skipping notarization requires a signed macOS build')
   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
   const packagesWindows = resolvedPlatform === 'win32'
-  const policy = packagesMacOS && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
+  const packagesLinux = resolvedPlatform === 'linux'
+  // The mandatory-update policy drives an updater that exists only on win32 and darwin, and
+  // main.ts rejects a configured policy on any other platform, so Linux must not ship one.
+  const policy = packagesLinux || (packagesMacOS && unsigned) ? undefined : resolveDesktopPolicyEnvironment(env)
   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
   const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
   if (packagesMacOS && !unsigned && !skipNotarization) resolveMacOSNotarizationEnvironment(env)
@@ -122,7 +125,9 @@ export function createElectronBuilderConfig(
     directories: { output: output.directory },
     asar: true,
     electronDist: buildPaths.electron,
-    electronFuses: { runAsNode: true },
+    // Fuses rewrite the Electron binary in place; the Linux launcher replaces that binary
+    // afterwards, so flipping fuses there would target the launcher script instead.
+    electronFuses: packagesLinux ? undefined : { runAsNode: true },
     beforeBuild: async () => {
       if (resolvedPlatform !== 'win32') return true
       await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
@@ -211,6 +216,13 @@ export function createElectronBuilderConfig(
         preparedRuntimeVersion ?? productVersion, { platform: resolvedPlatform, arch: resolvedArch })
       // Unsigned Windows builds skip electron-builder's afterSign hook.
       if (packagesWindows && unsigned) await verifyWindowsAsarUnpack(buildPaths.dsh, resourcesDir, windowsCode)
+      // Linux hosts can ship an incomplete libgbm that the loader binds before main() runs.
+      // Linux packaging sets no electronFuses, so no later step rewrites this executable.
+      if (packagesLinux) {
+        const { installLinuxGbmShim } = await import('./linux-gbm-shim.mjs')
+        installLinuxGbmShim({ appOutDir: context.appOutDir, resourcesDir,
+          resourcesSource: fileURLToPath(new URL('../resources/', import.meta.url)) })
+      }
     },
     afterSign: async context => {
       if (windowsSigner !== undefined) {
@@ -253,7 +265,15 @@ export function createElectronBuilderConfig(
     },
     linux: {
       category: 'Development',
-      target: ['AppImage'],
+      // tar.gz is published alongside the AppImage: the AppImage type-2 loader links the
+      // unversioned libz.so that only a development package provides, so hosts with just
+      // libz.so.1 cannot start it, while an extracted tree runs the bundled Electron directly.
+      target: ['AppImage', 'tar.gz'],
+      // Linux derives the executable from the package name, whose scope is unsafe in file paths.
+      executableName: 'deepseek-harness',
+      // Window association: desktop environments match a running window to this .desktop entry.
+      // The filename comes from package.json `desktopName`, which electron-builder reads directly.
+      syncDesktopName: true,
     },
     nsis: {
       uninstallDisplayName: '${productName}',
