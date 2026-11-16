@@ -155,6 +155,17 @@ describe.skipIf(!linuxToolchain)('Linux gbm launcher', () => {
     expect(text).toContain('exec "$bin" $degrade $ozoneArgs "$@"')
   })
 
+  it('omits Chromium switches when the binary runs as the bundled Node runtime', () => {
+    // The smoke test and the bundled `node` wrapper start this same binary with
+    // ELECTRON_RUN_AS_NODE set, where a Chromium switch is an invalid option.
+    const text = launcherText()
+    expect(text).toContain('if [ -n "${ELECTRON_RUN_AS_NODE:-}" ]; then')
+    const guard = text.indexOf('ELECTRON_RUN_AS_NODE')
+    expect(guard).toBeGreaterThan(text.indexOf('ozoneArgs='))
+    expect(guard).toBeGreaterThan(text.indexOf('degrade="--no-sandbox'))
+    expect(guard).toBeLessThan(text.indexOf('exec "$bin" $degrade $ozoneArgs "$@"'))
+  })
+
   it('hardcodes the degradation combination for every launch', () => {
     // The switches only apply before Chromium parses its command line, so they are
     // decided in the launcher rather than measured by application code, whose probe

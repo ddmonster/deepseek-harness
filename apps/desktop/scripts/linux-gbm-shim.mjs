@@ -66,7 +66,14 @@ fi
 # userland cannot initialize GL, and Chromium's shared-memory fallback needs the temp
 # directory. A host that can run accelerated can edit this file, which is plain shell.
 degrade="--no-sandbox --disable-gpu --disable-gpu-sandbox --disable-dev-shm-usage"
-${ozoneLauncherFragment}exec "$bin" $degrade $ozoneArgs "$@"
+${ozoneLauncherFragment}# Node mode runs this same binary as the bundled runtime, where Chromium switches are not
+# options and the launch fails with "bad option". The packaging smoke test, the bundled node
+# wrapper, and the program worker all start it that way.
+if [ -n "\${ELECTRON_RUN_AS_NODE:-}" ]; then
+  degrade=""
+  ozoneArgs=""
+fi
+exec "$bin" $degrade $ozoneArgs "$@"
 `
 
 /**
