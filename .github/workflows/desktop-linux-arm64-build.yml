@@ -1,0 +1,87 @@
+name: Build Desktop · Linux arm64
+
+# One-off artifact build for the aarch64 domestic-distro desktop shell. It runs on a
+# hosted arm64 runner because the packaging target rejects cross-compilation, so the
+# build host must itself be Linux arm64.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or SHA to build (defaults to the dispatched ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: linux-arm64 unsigned
+    # The packaging target refuses cross-compilation; hosted arm64 Linux is the cheapest
+    # native builder available.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Report build host
+        run: |
+          uname -m
+          node --version
+          pnpm --version
+          ldd --version | head -1
+
+      - name: Build the desktop artifact
+        env:
+          CI: 'true'
+          DSH_DESKTOP_TARGET_PLATFORM: linux
+          DSH_DESKTOP_TARGET_ARCH: arm64
+          DSH_GATE_CONCURRENCY: '3'
+          NODE_OPTIONS: --max-old-space-size=3072
+        run: pnpm --filter @deepseek-ai/dsh-desktop run package:linux:arm64:unsigned
+
+      - name: Verify the packaged launcher and manifest
+        run: |
+          set -euo pipefail
+          OUT=apps/desktop/.desktop-build/targets/linux-arm64/unsigned-artifacts
+          TARBALL=$(ls "$OUT"/*.tar.gz | head -1)
+          EXTRACT=$(mktemp -d)
+          tar -xzf "$TARBALL" -C "$EXTRACT"
+          LAUNCHER=$(find "$EXTRACT" -maxdepth 2 -name deepseek-harness -type f | head -1)
+          head -1 "$LAUNCHER"
+          grep -q '^#!/bin/sh' "$LAUNCHER"
+          # The launch combination is decided here because Chromium reads it before main runs.
+          grep -q 'degrade="--no-sandbox --disable-gpu --disable-gpu-sandbox --disable-dev-shm-usage"' "$LAUNCHER"
+          grep -q 'DSH_DESKTOP_OZONE_PLATFORM' "$LAUNCHER"
+          echo "launcher verified"
+
+      - name: Report artifacts
+        run: |
+          set -euo pipefail
+          OUT=apps/desktop/.desktop-build/targets/linux-arm64/unsigned-artifacts
+          ls -l "$OUT"
+          sha256sum "$OUT"/*.tar.gz "$OUT"/*.AppImage
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: desktop-linux-arm64-unsigned
+          path: |
+            apps/desktop/.desktop-build/targets/linux-arm64/unsigned-artifacts/*.tar.gz
+            apps/desktop/.desktop-build/targets/linux-arm64/unsigned-artifacts/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
