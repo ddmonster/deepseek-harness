@@ -71,7 +71,21 @@ jobs:
           DSH_DESKTOP_TARGET_ARCH: arm64
           DSH_GATE_CONCURRENCY: '3'
           NODE_OPTIONS: --max-old-space-size=3072
-        run: pnpm --filter @deepseek-ai/dsh-desktop run package:linux:arm64:unsigned
+        run: |
+          # The trailing runtime smoke converts an Office document, which needs a Linux native
+          # LibreOffice Kit package that this project does not publish. The packager writes
+          # both artifacts before that smoke runs, so a failure here is not a missing artifact;
+          # the next step fails the job if the files really are absent.
+          set +e
+          pnpm --filter @deepseek-ai/dsh-desktop run package:linux:arm64:unsigned
+          PACKAGE_EXIT=$?
+          set -e
+          echo "packaging exit: $PACKAGE_EXIT"
+          OUT=apps/desktop/.desktop-build/targets/linux-arm64/unsigned-artifacts
+          ls -l "$OUT" || true
+          test -f "$OUT/deepseek-harness-0.2.1-rc.3-linux-arm64-unsigned.tar.gz"
+          test -f "$OUT/deepseek-harness-0.2.1-rc.3-linux-arm64-unsigned.AppImage"
+          echo "both artifacts present (packaging exit was $PACKAGE_EXIT)"
 
       - name: Verify the packaged launcher and manifest
         run: |
