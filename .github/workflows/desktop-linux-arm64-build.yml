@@ -39,6 +39,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Write the unsigned Linux package environment
+        run: |
+          # `apps/desktop/.env.linux` is a Git-ignored local settings file. An unsigned
+          # artifact build needs only the shared release identity; mandatory-update policy
+          # settings are deliberately absent because a packaged policy entry refuses to
+          # start on Linux (`desktop policy: unsupported platform`).
+          cat > apps/desktop/.env.linux <<'ENV'
+          DSH_DESKTOP_APP_ID=com.deepseek.dsh
+          DSH_DESKTOP_AUTO_UPDATE_ENV=test
+          DSH_DESKTOP_NPM_REGISTRY=https://registry.npmjs.org
+          DSH_DESKTOP_LINUX_PACK_CONCURRENCY=4
+          ENV
+          cat apps/desktop/.env.linux
+
       - name: Report build host
         run: |
           uname -m
