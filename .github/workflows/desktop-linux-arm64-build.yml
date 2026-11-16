@@ -41,15 +41,19 @@ jobs:
 
       - name: Write the unsigned Linux package environment
         run: |
-          # `apps/desktop/.env.linux` is a Git-ignored local settings file. An unsigned
-          # artifact build needs only the shared release identity; mandatory-update policy
-          # settings are deliberately absent because a packaged policy entry refuses to
-          # start on Linux (`desktop policy: unsupported platform`).
+          # `apps/desktop/.env.linux` is a Git-ignored local settings file. The policy
+          # resolver runs before the Linux packager suppresses the policy entry, so a test
+          # deployment still needs an origin and login origins to validate even though this
+          # unsigned artifact ships no policy: `electron-builder-config.mjs` keeps the entry
+          # out of the Linux manifest, which is what lets the app start there.
           cat > apps/desktop/.env.linux <<'ENV'
           DSH_DESKTOP_APP_ID=com.deepseek.dsh
           DSH_DESKTOP_AUTO_UPDATE_ENV=test
           DSH_DESKTOP_NPM_REGISTRY=https://registry.npmjs.org
           DSH_DESKTOP_LINUX_PACK_CONCURRENCY=4
+          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://policy-test.example.com
+          DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://policy.example.com
+          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG={"allowedAuthOrigins":["https://login.example.com"]}
           ENV
           cat apps/desktop/.env.linux
 
